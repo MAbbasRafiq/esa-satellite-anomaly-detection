@@ -1,0 +1,40 @@
+/**
+ * Global styles + Tailwind.
+ *
+ * Tailwind v4: one @import pulls in the framework.
+ * CSS variables below define the visual theme (cool slate + teal accent —
+ * not the usual purple / cream AI defaults).
+ */
+@import "tailwindcss";
+
+/* Theme tokens used across components via var(--...) or Tailwind theme */
+@theme {
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Instrument Serif", ui-serif, Georgia, serif;
+
+  --color-ink: #0c1222;
+  --color-ink-muted: #5b657a;
+  --color-surface: #f4f7fb;
+  --color-panel: #ffffff;
+  --color-line: #d8e0ec;
+  --color-accent: #0d9488;
+  --color-accent-dark: #0f766e;
+  --color-danger: #b91c1c;
+}
+
+/* Full-page background atmosphere (subtle gradient, not flat white) */
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  color: var(--color-ink);
+  background:
+    radial-gradient(ellipse 80% 50% at 10% -10%, #c7efe9 0%, transparent 55%),
+    radial-gradient(ellipse 60% 40% at 100% 0%, #dbe7f8 0%, transparent 50%),
+    var(--color-surface);
+}

@@ -1,0 +1,6 @@
+numpy
+pandas
+more-itertools
+# Lab Docker image used tensorflow/tensorflow:2.5.1-gpu. Newer TF may still
+# load model.h5; if load_model fails, install tensorflow==2.5.1 (or 2.8–2.11).
+tensorflow>=2.5,<2.12
