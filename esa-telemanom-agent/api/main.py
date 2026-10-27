@@ -1,94 +1,60 @@
 #!/usr/bin/env python3
 """FastAPI entrypoint for the ESA Telemanom agent.
 
-What this file does:
-  1. Creates a small HTTP app
-  2. Allows a browser/React app on localhost to call it (CORS)
-  3. Exposes:
-       GET  /health      → simple "is the server up?" check
-       POST /agent/run   → run the existing CLI agent once, return JSON
+Routes:
+  GET  /health
+  GET  /samples              → prepared demo CSV list (friendly names)
+  POST /agent/run            → JSON body (path-based; still used by CLI-style clients)
+  POST /agent/run-upload     → multipart: question + optional uploaded CSV or sample_id
 
-What this file does NOT do:
-  - It does not retrain Telemanom
-  - It does not rebuild the FAISS index
-  - It does not replace agent/llm.py — it only calls run_agent()
+Upload flow (what the React UI uses):
+  1. Analyst picks a prepared sample OR uploads their own CSV
+  2. Browser sends multipart form to /agent/run-upload
+  3. We save uploads under uploads/ (or use samples/ path)
+  4. We call run_agent with skip_rows=0 on that whole small file
 
-How to run (from the project root, conda env esa-agent):
+How to run:
 
+  conda activate esa-agent
   cd ~/ESA_ADB/esa-telemanom-agent
-  pip install -r requirements.txt   # includes fastapi + uvicorn
   uvicorn api.main:app --reload --host 127.0.0.1 --port 8100
-
-Then open:
-  http://127.0.0.1:8100/docs     ← interactive Swagger UI (good for testing)
-  http://127.0.0.1:8100/health
-
-Note: we use port 8100 (not 8000) so this project can run beside
-another local app that already uses 8000 / 5173.
 """
 from __future__ import annotations
 
 import sys
 import traceback
+import uuid
 from pathlib import Path
+from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 # ---------------------------------------------------------------------------
-# Make sure we can import the existing agent code
+# Import path setup (same pattern as before)
 # ---------------------------------------------------------------------------
-#
-# Layout reminder:
-#   esa-telemanom-agent/          ← project root (ROOT)
-#     agent/                      ← CLI agent (config, tools, llm, agent.py)
-#     api/                        ← this FastAPI package
-#     rag/, scoring/, model/, ...
-#
-# When uvicorn loads "api.main", the current working directory is usually ROOT,
-# but we still set sys.path explicitly so imports stay reliable.
 
 API_DIR = Path(__file__).resolve().parent
 ROOT = API_DIR.parent
 AGENT_DIR = ROOT / "agent"
+UPLOADS_DIR = ROOT / "uploads"
 
-# Project root → import rag, scoring, api
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
-# Agent folder → import config, tools, llm  (same style as python agent.py)
 if str(AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(AGENT_DIR))
 
-# Import config first: loads .env and sets TRANSFORMERS_NO_TF.
 import config  # noqa: E402, F401
-
-# The same function the CLI uses.
 from llm import run_agent  # noqa: E402
 
+from api.samples_catalog import list_available_samples, resolve_sample_path  # noqa: E402
 from api.schemas import AgentRunRequest, AgentRunResponse, ToolStep  # noqa: E402
-
-
-# ---------------------------------------------------------------------------
-# Create the FastAPI application
-# ---------------------------------------------------------------------------
 
 app = FastAPI(
     title="ESA Telemanom Agent API",
-    description=(
-        "HTTP wrapper around the ESA Telemanom single agent "
-        "(RAG + score_telemetry + compare_alarms_to_labels)."
-    ),
-    version="0.1.0",
+    description="HTTP wrapper around the ESA Telemanom single agent.",
+    version="0.2.0",
 )
-
-
-# ---------------------------------------------------------------------------
-# CORS — so a React app on another localhost port can call this API
-# ---------------------------------------------------------------------------
-#
-# Frontend for THIS project runs on Vite port 5180 (see frontend/vite.config.ts).
-# We also keep 5173 in the list in case you temporarily use the default Vite port.
 
 ALLOWED_ORIGINS = [
     "http://localhost:5180",
@@ -101,105 +67,18 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    # Allow common methods the React app will use.
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
 
 # ---------------------------------------------------------------------------
-# Routes
+# Helpers
 # ---------------------------------------------------------------------------
 
 
-@app.get("/health")
-def health() -> dict:
-    """Return a tiny status payload so we know the server is alive.
-
-    Example:
-      curl http://127.0.0.1:8100/health
-    """
-    return {
-        "status": "ok",
-        "service": "esa-telemanom-agent-api",
-    }
-
-
-@app.post("/agent/run", response_model=AgentRunResponse)
-def agent_run(body: AgentRunRequest) -> AgentRunResponse:
-    """Run the Telemanom agent once and return the full result as JSON.
-
-    Flow:
-      1. Client sends JSON (question + optional csv / skip / max_rows / k)
-      2. We call llm.run_agent(...) — same code path as the CLI
-      3. We wrap the dict into AgentRunResponse and return it
-
-    Example with curl (RAG-only question):
-
-      curl -X POST http://127.0.0.1:8100/agent/run \\
-        -H "Content-Type: application/json" \\
-        -d '{"question": "What is the look-back window size?", "k": 3}'
-
-    Example with a telemetry CSV (score + compare):
-
-      curl -X POST http://127.0.0.1:8100/agent/run \\
-        -H "Content-Type: application/json" \\
-        -d '{
-              "question": "Score the slice and compare alarms to labels. Summarize.",
-              "csv_path": "/path/to/84_months.test.csv",
-              "skip_rows": 33064,
-              "max_rows": 3000
-            }'
-
-    Note:
-      This is a normal (non-async) function on purpose.
-      FastAPI will run it in a worker thread so the blocking LLM /
-      TensorFlow work does not freeze the whole server process in a
-      confusing way. Keep it simple — no custom thread pools here.
-    """
-    # Basic guard: empty / whitespace-only questions are not useful.
-    question = body.question.strip()
-    if not question:
-        raise HTTPException(
-            status_code=400,
-            detail="question must not be empty",
-        )
-
-    try:
-        # Call the existing agent loop. Returns a plain dict:
-        #   {
-        #     "provider": "Groq",
-        #     "model": "...",
-        #     "tool_steps": [ {"tool", "args", "observation"}, ... ],
-        #     "final_answer": "..."
-        #   }
-        result = run_agent(
-            question,
-            k=body.k,
-            model=body.model,
-            csv_hint=body.csv_path,
-            default_max_rows=body.max_rows,
-            default_skip_rows=body.skip_rows,
-        )
-    except SystemExit as exc:
-        # resolve_llm_config() raises SystemExit when no API key is set.
-        # Turn that into a clear HTTP 503 for the frontend.
-        raise HTTPException(
-            status_code=503,
-            detail=str(exc) if str(exc) else "LLM is not configured (missing API key in .env)",
-        ) from exc
-    except Exception as exc:
-        # Unexpected errors: log the traceback to the server console,
-        # return a short message to the client (no huge stack dumps in JSON).
-        print("ERROR in /agent/run:")
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=500,
-            detail=f"Agent failed: {type(exc).__name__}: {exc}",
-        ) from exc
-
-    # Convert each tool step dict into the ToolStep model.
-    # We do this in a plain loop so it is easy to read.
+def _result_to_response(result: dict) -> AgentRunResponse:
+    """Convert the plain dict from run_agent() into the API response model."""
     tool_steps: list[ToolStep] = []
     for step in result.get("tool_steps", []):
         tool_steps.append(
@@ -209,10 +88,146 @@ def agent_run(body: AgentRunRequest) -> AgentRunResponse:
                 observation=step.get("observation", ""),
             )
         )
-
     return AgentRunResponse(
         provider=result.get("provider", ""),
         model=result.get("model", ""),
         tool_steps=tool_steps,
         final_answer=result.get("final_answer", ""),
+    )
+
+
+def _call_agent(
+    question: str,
+    csv_path: Optional[str],
+    max_rows: int,
+    skip_rows: int,
+    k: int = 5,
+) -> AgentRunResponse:
+    """Run the agent and map errors to HTTPException."""
+    try:
+        result = run_agent(
+            question,
+            k=k,
+            model=None,
+            csv_hint=csv_path,
+            default_max_rows=max_rows,
+            default_skip_rows=skip_rows,
+        )
+        return _result_to_response(result)
+    except SystemExit as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=str(exc) if str(exc) else "Assistant is not configured (missing API key).",
+        ) from exc
+    except Exception as exc:
+        print("ERROR while running agent:")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Assistant failed: {type(exc).__name__}: {exc}",
+        ) from exc
+
+
+def _save_upload(upload: UploadFile) -> Path:
+    """Save an uploaded CSV into uploads/ and return the absolute path."""
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+    original_name = upload.filename or "telemetry.csv"
+    # Keep only the file name (no directories from the client).
+    safe_name = Path(original_name).name
+    if not safe_name.lower().endswith(".csv"):
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload a CSV telemetry file.",
+        )
+
+    # Unique prefix so two users do not overwrite each other.
+    dest = UPLOADS_DIR / f"{uuid.uuid4().hex}_{safe_name}"
+
+    # Read and write in a simple loop (clearer than fancy streaming helpers).
+    data = upload.file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+    dest.write_bytes(data)
+    return dest
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+
+@app.get("/health")
+def health() -> dict:
+    """Simple liveness check for developers / scripts."""
+    return {"status": "ok", "service": "esa-telemanom-agent-api"}
+
+
+@app.get("/samples")
+def samples() -> dict:
+    """List prepared sample files with analyst-friendly titles.
+
+    The UI uses this to offer "try a prepared window" without showing paths.
+    """
+    return {"samples": list_available_samples()}
+
+
+@app.post("/agent/run", response_model=AgentRunResponse)
+def agent_run(body: AgentRunRequest) -> AgentRunResponse:
+    """JSON entrypoint (path-based). Kept for curl / advanced clients."""
+    question = body.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Please enter a question.")
+
+    return _call_agent(
+        question=question,
+        csv_path=body.csv_path,
+        max_rows=body.max_rows,
+        skip_rows=body.skip_rows,
+        k=body.k,
+    )
+
+
+@app.post("/agent/run-upload", response_model=AgentRunResponse)
+async def agent_run_upload(
+    question: str = Form(..., description="User question"),
+    # Optional: browser file upload
+    file: Optional[UploadFile] = File(None),
+    # Optional: id of a prepared sample under samples/
+    sample_id: Optional[str] = Form(None),
+) -> AgentRunResponse:
+    """Main UI entrypoint: question + optional telemetry CSV.
+
+    Rules:
+      - If the user uploads a file, we save it and score that whole file.
+      - Else if sample_id is set, we use that prepared sample file.
+      - Else RAG-only (no CSV) — good for "ask about the model" questions.
+      - Prepared samples are already small, so skip_rows is always 0.
+    """
+    question = question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Please enter a question.")
+
+    csv_path: Optional[str] = None
+
+    # Prefer an explicit upload over a sample id if both are sent.
+    if file is not None and file.filename:
+        saved = _save_upload(file)
+        csv_path = str(saved)
+    elif sample_id:
+        sample_id = sample_id.strip()
+        if sample_id:
+            try:
+                csv_path = str(resolve_sample_path(sample_id))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Whole small file: no skipping. max_rows high enough for our samples.
+    # (Uploaded analyst files should also be modest slices, not multi-GB.)
+    return _call_agent(
+        question=question,
+        csv_path=csv_path,
+        max_rows=20000,
+        skip_rows=0,
+        k=5,
     )

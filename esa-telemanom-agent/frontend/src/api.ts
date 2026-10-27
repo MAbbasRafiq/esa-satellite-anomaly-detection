@@ -1,31 +1,21 @@
 /**
- * Small HTTP helpers for talking to the FastAPI backend.
+ * HTTP helpers for the FastAPI backend.
  *
- * No axios — fetch is enough and keeps dependencies low.
+ * The main UI uses runAgentUpload() (multipart form).
+ * Health / samples are small JSON GETs.
  */
-import type { AgentRunRequest, AgentRunResponse } from "./types";
+import type { AgentRunResponse, SampleInfo } from "./types";
 
-/**
- * Base URL of the FastAPI server.
- *
- * Priority:
- *   1. VITE_API_BASE from a .env file (optional)
- *   2. Default local uvicorn address for THIS project (port 8100)
- */
+/** API base URL (not shown in the analyst UI). */
 export function getApiBase(): string {
   const fromEnv = import.meta.env.VITE_API_BASE;
   if (fromEnv && fromEnv.trim().length > 0) {
-    // Remove a trailing slash so we can safely join paths.
     return fromEnv.replace(/\/$/, "");
   }
-  // Not 8000 — that port is often used by other local projects.
   return "http://127.0.0.1:8100";
 }
 
-/**
- * Call GET /health to check if the API is reachable.
- * Returns true on success, false on network / non-OK response.
- */
+/** GET /health — used only to fail early with a friendly message. */
 export async function checkHealth(): Promise<boolean> {
   try {
     const response = await fetch(`${getApiBase()}/health`);
@@ -35,40 +25,64 @@ export async function checkHealth(): Promise<boolean> {
     const data = (await response.json()) as { status?: string };
     return data.status === "ok";
   } catch {
-    // Network error (server down, CORS blocked, etc.)
     return false;
   }
 }
 
+/** GET /samples — prepared demo windows with friendly titles. */
+export async function fetchSamples(): Promise<SampleInfo[]> {
+  const response = await fetch(`${getApiBase()}/samples`);
+  if (!response.ok) {
+    return [];
+  }
+  const data = (await response.json()) as { samples?: SampleInfo[] };
+  return data.samples ?? [];
+}
+
 /**
- * Call POST /agent/run with the form values.
- * Throws an Error with a readable message if the API returns an error.
+ * POST /agent/run-upload
+ *
+ * Sends:
+ *   - question (always)
+ *   - file (optional browser upload), OR
+ *   - sample_id (optional prepared sample)
  */
-export async function runAgent(
-  body: AgentRunRequest,
-): Promise<AgentRunResponse> {
-  const response = await fetch(`${getApiBase()}/agent/run`, {
+export async function runAgentUpload(options: {
+  question: string;
+  file?: File | null;
+  sampleId?: string | null;
+}): Promise<AgentRunResponse> {
+  const form = new FormData();
+  form.append("question", options.question);
+
+  if (options.file) {
+    form.append("file", options.file);
+  } else if (options.sampleId) {
+    form.append("sample_id", options.sampleId);
+  }
+
+  const response = await fetch(`${getApiBase()}/agent/run-upload`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
+    body: form,
+    // Do not set Content-Type manually — the browser sets multipart boundaries.
   });
 
-  // FastAPI returns { detail: "..." } on HTTPException.
   if (!response.ok) {
-    let message = `Request failed (${response.status})`;
+    let message = "Something went wrong. Please try again.";
     try {
       const errBody = (await response.json()) as { detail?: string };
       if (errBody.detail) {
         message = errBody.detail;
       }
     } catch {
-      // Response was not JSON — keep the generic message.
+      // keep generic message
+    }
+    // Friendlier offline hint
+    if (response.status === 0 || response.type === "error") {
+      message = "The assistant is not available right now. Please try again later.";
     }
     throw new Error(message);
   }
 
-  const data = (await response.json()) as AgentRunResponse;
-  return data;
+  return (await response.json()) as AgentRunResponse;
 }

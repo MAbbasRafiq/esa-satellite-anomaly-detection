@@ -1,69 +1,58 @@
 /**
- * Main page for the ESA Telemanom Agent UI.
+ * Analyst UI — question + optional telemetry attach.
  *
- * Layout:
- *   - Header (brand + API health)
- *   - Left / top: question + run controls
- *   - Side settings: csv_path, skip_rows, max_rows, k
- *   - Results: final answer + expandable tool steps
- *
- * Data flow:
- *   form state → runAgent() in api.ts → POST FastAPI /agent/run → set result
+ * No API URLs, ports, skip_rows, or CSV paths on screen.
+ * Prepared samples are small copies of the lab test file (original untouched).
  */
 import { FormEvent, useEffect, useState } from "react";
-import { checkHealth, getApiBase, runAgent } from "./api";
-import ExamplePrompts from "./components/ExamplePrompts";
+import { checkHealth, fetchSamples, runAgentUpload } from "./api";
+import IntentActions from "./components/IntentActions";
+import TelemetryAttach from "./components/TelemetryAttach";
 import ToolSteps from "./components/ToolSteps";
-import type { AgentRunResponse } from "./types";
+import { INTENTS, type Intent } from "./intents";
+import type { AgentRunResponse, SampleInfo } from "./types";
 
 export default function App() {
-  // ---- Form fields (same ideas as CLI flags / AgentRunRequest) ----
   const [question, setQuestion] = useState(
     "What is the look-back window size?",
   );
-  const [csvPath, setCsvPath] = useState("");
-  const [skipRows, setSkipRows] = useState(0);
-  const [maxRows, setMaxRows] = useState(3000);
-  const [k, setK] = useState(5);
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [sampleId, setSampleId] = useState<string | null>(null);
+  const [samples, setSamples] = useState<SampleInfo[]>([]);
 
-  // ---- Request / response UI state ----
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AgentRunResponse | null>(null);
 
-  // true / false / null (null = still checking on first load)
-  const [apiOk, setApiOk] = useState<boolean | null>(null);
-
-  // On mount: ping GET /health once so the user knows if uvicorn is up.
+  // Load prepared sample cards once (failures stay silent — upload still works).
   useEffect(() => {
     let cancelled = false;
 
-    async function ping() {
-      const ok = await checkHealth();
+    async function load() {
+      const list = await fetchSamples();
       if (!cancelled) {
-        setApiOk(ok);
+        setSamples(list);
       }
     }
 
-    ping();
-
-    // Cleanup if the component unmounts before ping finishes.
+    load();
     return () => {
       cancelled = true;
     };
   }, []);
 
-  /**
-   * Submit handler for the main form.
-   * Prevents full-page reload, then calls the FastAPI agent.
-   */
-  async function handleSubmit(event: FormEvent) {
-    // Stop the browser from doing a normal HTML form post / page reload.
-    event.preventDefault();
+  /** True when the user has either uploaded a file or picked a sample. */
+  function hasTelemetry(): boolean {
+    return uploadedFile !== null || (sampleId !== null && sampleId.length > 0);
+  }
 
-    const trimmed = question.trim();
+  /**
+   * Run the assistant with the current question + optional telemetry.
+   */
+  async function runCurrent(questionText: string) {
+    const trimmed = questionText.trim();
     if (!trimmed) {
-      setError("Please enter a question.");
+      setError("Please enter a question, or choose a quick action.");
       return;
     }
 
@@ -71,171 +60,110 @@ export default function App() {
     setError(null);
 
     try {
-      const data = await runAgent({
+      // Soft check so we can show a calm message if the service is down.
+      const ok = await checkHealth();
+      if (!ok) {
+        throw new Error(
+          "The assistant is not available right now. Please try again in a moment.",
+        );
+      }
+
+      const data = await runAgentUpload({
         question: trimmed,
-        k: k,
-        // Empty string → send null so the backend treats CSV as "not set"
-        csv_path: csvPath.trim() ? csvPath.trim() : null,
-        max_rows: maxRows,
-        skip_rows: skipRows,
+        file: uploadedFile,
+        sampleId: uploadedFile ? null : sampleId,
       });
       setResult(data);
-      // If we got a successful answer, mark API as healthy.
-      setApiOk(true);
     } catch (err) {
-      // Show a readable message in the UI.
       const message =
-        err instanceof Error ? err.message : "Unknown error while calling the API";
+        err instanceof Error
+          ? err.message
+          : "Something went wrong. Please try again.";
       setError(message);
-      setApiOk(false);
     } finally {
-      // Always clear the loading flag, success or failure.
       setLoading(false);
     }
   }
 
+  async function handleSubmit(event: FormEvent) {
+    event.preventDefault();
+    await runCurrent(question);
+  }
+
+  async function handleIntent(intent: Intent) {
+    setQuestion(intent.question);
+
+    if (intent.needsTelemetry && !hasTelemetry()) {
+      setError(
+        "This check needs a telemetry file. Upload a CSV or choose a prepared sample first.",
+      );
+      return;
+    }
+
+    await runCurrent(intent.question);
+  }
+
   return (
-    <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
-      {/* ---------- Header ---------- */}
+    <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6 sm:py-10">
       <header className="mb-8">
         <p className="mb-1 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--color-accent-dark)]">
           ESA-ADB · Telemanom
         </p>
         <h1 className="font-[family-name:var(--font-display)] text-4xl leading-tight text-[var(--color-ink)] sm:text-5xl">
-          Telemanom Agent
+          Telemanom Assistant
         </h1>
         <p className="mt-2 max-w-2xl text-sm text-[var(--color-ink-muted)] sm:text-base">
-          Ask about the lab model via RAG, or score a telemetry CSV slice and
-          compare alarms to ground-truth labels. This UI calls the FastAPI
-          backend — the same tools as the CLI.
+          Ask about the detection system, or attach a telemetry window to check
+          for anomalies and compare with known events.
         </p>
-
-        {/* API status chip */}
-        <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-[var(--color-ink-muted)]">
-          <span
-            className={
-              "inline-flex items-center gap-2 rounded-full border px-3 py-1 " +
-              (apiOk === true
-                ? "border-teal-200 bg-teal-50 text-teal-800"
-                : apiOk === false
-                  ? "border-red-200 bg-red-50 text-red-800"
-                  : "border-[var(--color-line)] bg-white")
-            }
-          >
-            {/* Small status dot */}
-            <span
-              className={
-                "h-2 w-2 rounded-full " +
-                (apiOk === true
-                  ? "bg-teal-500"
-                  : apiOk === false
-                    ? "bg-red-500"
-                    : "bg-slate-300")
-              }
-            />
-            {apiOk === null && "Checking API…"}
-            {apiOk === true && "API connected"}
-            {apiOk === false && "API unreachable — start uvicorn on :8100"}
-          </span>
-          <span className="font-mono text-[11px]">{getApiBase()}</span>
-        </div>
       </header>
 
-      {/* ---------- Main grid: settings + question ---------- */}
-      <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
-        {/* Settings panel (CSV slice + RAG k) */}
-        <aside className="h-fit rounded-2xl border border-[var(--color-line)] bg-[var(--color-panel)]/90 p-5 shadow-sm backdrop-blur">
-          <h2 className="mb-4 text-sm font-semibold text-[var(--color-ink)]">
-            Run settings
+      <div className="space-y-8">
+        {/* Quick actions */}
+        <section>
+          <h2 className="mb-1 text-sm font-semibold text-[var(--color-ink)]">
+            Quick actions
           </h2>
-
-          <label className="mb-4 block text-xs font-medium text-[var(--color-ink-muted)]">
-            CSV path (optional)
-            <input
-              type="text"
-              value={csvPath}
-              onChange={(e) => setCsvPath(e.target.value)}
-              disabled={loading}
-              placeholder="/path/to/84_months.test.csv"
-              className="mt-1.5 w-full rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none focus:border-[var(--color-accent)]"
-            />
-          </label>
-
-          <label className="mb-4 block text-xs font-medium text-[var(--color-ink-muted)]">
-            skip_rows
-            <input
-              type="number"
-              min={0}
-              value={skipRows}
-              onChange={(e) => setSkipRows(Number(e.target.value) || 0)}
-              disabled={loading}
-              className="mt-1.5 w-full rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
-            />
-          </label>
-
-          <label className="mb-4 block text-xs font-medium text-[var(--color-ink-muted)]">
-            max_rows
-            <input
-              type="number"
-              min={1}
-              value={maxRows}
-              onChange={(e) => setMaxRows(Number(e.target.value) || 1)}
-              disabled={loading}
-              className="mt-1.5 w-full rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
-            />
-          </label>
-
-          <label className="block text-xs font-medium text-[var(--color-ink-muted)]">
-            RAG k (1–8)
-            <input
-              type="number"
-              min={1}
-              max={8}
-              value={k}
-              onChange={(e) => {
-                // Clamp into the same range the backend accepts.
-                const value = Number(e.target.value) || 1;
-                const clamped = Math.max(1, Math.min(8, value));
-                setK(clamped);
-              }}
-              disabled={loading}
-              className="mt-1.5 w-full rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
-            />
-          </label>
-
-          <p className="mt-4 text-[11px] leading-relaxed text-[var(--color-ink-muted)]">
-            Leave CSV empty for RAG-only questions. For score / compare, set a
-            path the <em>API server</em> can read (same machine as uvicorn).
+          <p className="mb-3 text-xs text-[var(--color-ink-muted)]">
+            One click starts a common task. Anomaly checks need a file attached
+            below.
           </p>
-        </aside>
+          <IntentActions
+            intents={INTENTS}
+            disabled={loading}
+            onChoose={handleIntent}
+          />
+        </section>
 
-        {/* Question form + results */}
-        <section className="space-y-6">
+        {/* File attach + samples */}
+        <section>
+          <TelemetryAttach
+            samples={samples}
+            sampleId={sampleId}
+            uploadedFile={uploadedFile}
+            disabled={loading}
+            onSelectSample={setSampleId}
+            onUploadFile={setUploadedFile}
+          />
+        </section>
+
+        {/* Question */}
+        <section>
           <form
             onSubmit={handleSubmit}
-            className="rounded-2xl border border-[var(--color-line)] bg-[var(--color-panel)]/90 p-5 shadow-sm backdrop-blur sm:p-6"
+            className="rounded-2xl border border-[var(--color-line)] bg-[var(--color-panel)]/90 p-5 shadow-sm sm:p-6"
           >
             <label className="mb-2 block text-sm font-semibold text-[var(--color-ink)]">
-              Question
+              Your question
             </label>
-
             <textarea
               value={question}
               onChange={(e) => setQuestion(e.target.value)}
               disabled={loading}
               rows={3}
-              className="w-full resize-y rounded-xl border border-[var(--color-line)] bg-[var(--color-surface)] px-4 py-3 text-sm leading-relaxed text-[var(--color-ink)] outline-none focus:border-[var(--color-accent)]"
+              placeholder="e.g. How many channels does the model watch?"
+              className="w-full resize-y rounded-xl border border-[var(--color-line)] bg-[var(--color-surface)] px-4 py-3 text-sm leading-relaxed outline-none focus:border-[var(--color-accent)]"
             />
-
-            <div className="mt-3">
-              <p className="mb-2 text-xs font-medium text-[var(--color-ink-muted)]">
-                Examples
-              </p>
-              <ExamplePrompts
-                disabled={loading}
-                onSelect={(text) => setQuestion(text)}
-              />
-            </div>
 
             <div className="mt-5 flex flex-wrap items-center gap-3">
               <button
@@ -243,54 +171,45 @@ export default function App() {
                 disabled={loading}
                 className="rounded-xl bg-[var(--color-accent)] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[var(--color-accent-dark)] disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {/* Button label changes while waiting for Groq + tools */}
-                {loading ? "Running agent…" : "Run agent"}
+                {loading ? "Working…" : "Ask assistant"}
               </button>
-
               {loading && (
                 <span className="text-xs text-[var(--color-ink-muted)]">
-                  This can take a while if scoring Telemanom…
+                  Anomaly checks can take a minute…
                 </span>
               )}
             </div>
           </form>
-
-          {/* Error banner */}
-          {error && (
-            <div
-              className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-[var(--color-danger)]"
-              role="alert"
-            >
-              {error}
-            </div>
-          )}
-
-          {/* Successful result */}
-          {result && (
-            <div className="space-y-4">
-              <div className="rounded-2xl border border-[var(--color-line)] bg-[var(--color-panel)] p-5 shadow-sm sm:p-6">
-                <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-                  <h2 className="text-sm font-semibold text-[var(--color-ink)]">
-                    Final answer
-                  </h2>
-                  <p className="text-xs text-[var(--color-ink-muted)]">
-                    {result.provider} · {result.model}
-                  </p>
-                </div>
-                <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-[var(--color-ink)]">
-                  {result.final_answer}
-                </p>
-              </div>
-
-              <div className="rounded-2xl border border-[var(--color-line)] bg-[var(--color-panel)]/80 p-5 shadow-sm sm:p-6">
-                <h2 className="mb-3 text-sm font-semibold text-[var(--color-ink)]">
-                  Tool steps ({result.tool_steps.length})
-                </h2>
-                <ToolSteps steps={result.tool_steps} />
-              </div>
-            </div>
-          )}
         </section>
+
+        {error && (
+          <div
+            className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-[var(--color-danger)]"
+            role="alert"
+          >
+            {error}
+          </div>
+        )}
+
+        {result && (
+          <section className="space-y-4">
+            <div className="rounded-2xl border border-[var(--color-line)] bg-[var(--color-panel)] p-5 shadow-sm sm:p-6">
+              <h2 className="mb-3 text-sm font-semibold text-[var(--color-ink)]">
+                Answer
+              </h2>
+              <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-[var(--color-ink)]">
+                {result.final_answer}
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-[var(--color-line)] bg-[var(--color-panel)]/80 p-5 shadow-sm sm:p-6">
+              <h2 className="mb-3 text-sm font-semibold text-[var(--color-ink)]">
+                What the system did
+              </h2>
+              <ToolSteps steps={result.tool_steps} />
+            </div>
+          </section>
+        )}
       </div>
     </div>
   );

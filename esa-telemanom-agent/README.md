@@ -111,9 +111,12 @@ npm install
 npm run dev
 ```
 
-Open http://127.0.0.1:5180 — the UI calls `POST /agent/run` on port 8100.
+Open http://127.0.0.1:5180 — the UI calls `POST /agent/run-upload`.
 
-Optional: copy `frontend/.env.example` → `frontend/.env` and set `VITE_API_BASE`.
+Analyst UI: question + **CSV upload** (or prepared samples under `samples/`).  
+No ports, paths, or `skip_rows` on screen. Original `84_months.test.csv` is untouched.
+
+Optional: `frontend/.env` with `VITE_API_BASE` if the API is not on port 8100.
 
 ## Tools
 
