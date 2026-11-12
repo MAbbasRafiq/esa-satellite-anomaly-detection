@@ -1,66 +1,78 @@
 /**
- * Analyst UI — question + optional telemetry attach.
- *
- * No API URLs, ports, skip_rows, or CSV paths on screen.
- * Prepared samples are small copies of the lab test file (original untouched).
+ * ChatGPT-style layout:
+ *   - Left sidebar (session, quick asks, attach status)
+ *   - Clean message area
+ *   - Composer pinned at the bottom (attach + text + send)
  */
-import { FormEvent, useEffect, useState } from "react";
-import { checkHealth, fetchSamples, runAgentUpload } from "./api";
-import IntentActions from "./components/IntentActions";
-import TelemetryAttach from "./components/TelemetryAttach";
+import { useEffect, useRef, useState } from "react";
+import { checkHealth, runAgentUpload } from "./api";
+import ChatComposer from "./components/ChatComposer";
+import Sidebar from "./components/Sidebar";
 import ToolSteps from "./components/ToolSteps";
-import { INTENTS, type Intent } from "./intents";
-import type { AgentRunResponse, SampleInfo } from "./types";
+import type { AgentRunResponse } from "./types";
+
+type ChatTurn = {
+  question: string;
+  fileName: string | null;
+  result: AgentRunResponse | null;
+  error: string | null;
+};
 
 export default function App() {
-  const [question, setQuestion] = useState(
-    "What is the look-back window size?",
-  );
+  const [question, setQuestion] = useState("");
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
-  const [sampleId, setSampleId] = useState<string | null>(null);
-  const [samples, setSamples] = useState<SampleInfo[]>([]);
-
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<AgentRunResponse | null>(null);
+  const [turns, setTurns] = useState<ChatTurn[]>([]);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  // Load prepared sample cards once (failures stay silent — upload still works).
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const mainRef = useRef<HTMLElement>(null);
+  const turnRefs = useRef<(HTMLDivElement | null)[]>([]);
+
+  // Scroll the message pane itself (not the window) to the latest turn.
   useEffect(() => {
-    let cancelled = false;
-
-    async function load() {
-      const list = await fetchSamples();
-      if (!cancelled) {
-        setSamples(list);
-      }
+    const main = mainRef.current;
+    if (!main) {
+      return;
     }
+    main.scrollTo({ top: main.scrollHeight, behavior: "smooth" });
+  }, [turns, loading]);
 
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  /** True when the user has either uploaded a file or picked a sample. */
-  function hasTelemetry(): boolean {
-    return uploadedFile !== null || (sampleId !== null && sampleId.length > 0);
+  function newChat() {
+    if (loading) {
+      return;
+    }
+    setTurns([]);
+    setQuestion("");
+    setUploadedFile(null);
   }
 
-  /**
-   * Run the assistant with the current question + optional telemetry.
-   */
-  async function runCurrent(questionText: string) {
-    const trimmed = questionText.trim();
-    if (!trimmed) {
-      setError("Please enter a question, or choose a quick action.");
+  function selectTurn(index: number) {
+    const el = turnRefs.current[index];
+    const main = mainRef.current;
+    if (!el || !main) {
+      return;
+    }
+    main.scrollTo({ top: el.offsetTop - 16, behavior: "smooth" });
+  }
+
+  async function sendMessage() {
+    const trimmed = question.trim();
+    if (!trimmed || loading) {
       return;
     }
 
+    const fileName = uploadedFile ? uploadedFile.name : null;
     setLoading(true);
-    setError(null);
+
+    // Show the user bubble immediately.
+    setTurns((prev) => [
+      ...prev,
+      { question: trimmed, fileName, result: null, error: null },
+    ]);
+    setQuestion("");
 
     try {
-      // Soft check so we can show a calm message if the service is down.
       const ok = await checkHealth();
       if (!ok) {
         throw new Error(
@@ -71,145 +83,179 @@ export default function App() {
       const data = await runAgentUpload({
         question: trimmed,
         file: uploadedFile,
-        sampleId: uploadedFile ? null : sampleId,
+        sampleId: null,
       });
-      setResult(data);
+
+      setTurns((prev) => {
+        const copy = [...prev];
+        const last = copy[copy.length - 1];
+        copy[copy.length - 1] = { ...last, result: data, error: null };
+        return copy;
+      });
     } catch (err) {
       const message =
         err instanceof Error
           ? err.message
           : "Something went wrong. Please try again.";
-      setError(message);
+      setTurns((prev) => {
+        const copy = [...prev];
+        const last = copy[copy.length - 1];
+        copy[copy.length - 1] = { ...last, result: null, error: message };
+        return copy;
+      });
     } finally {
       setLoading(false);
     }
   }
 
-  async function handleSubmit(event: FormEvent) {
-    event.preventDefault();
-    await runCurrent(question);
-  }
-
-  async function handleIntent(intent: Intent) {
-    setQuestion(intent.question);
-
-    if (intent.needsTelemetry && !hasTelemetry()) {
-      setError(
-        "This check needs a telemetry file. Upload a CSV or choose a prepared sample first.",
-      );
-      return;
-    }
-
-    await runCurrent(intent.question);
-  }
+  const hasMessages = turns.length > 0;
 
   return (
-    <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6 sm:py-10">
-      <header className="mb-8">
-        <p className="mb-1 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--color-accent-dark)]">
-          ESA-ADB · Telemanom
-        </p>
-        <h1 className="font-[family-name:var(--font-display)] text-4xl leading-tight text-[var(--color-ink)] sm:text-5xl">
-          Telemanom Assistant
-        </h1>
-        <p className="mt-2 max-w-2xl text-sm text-[var(--color-ink-muted)] sm:text-base">
-          Ask about the detection system, or attach a telemetry window to check
-          for anomalies and compare with known events.
-        </p>
-      </header>
+    <div className="flex h-[100dvh] overflow-hidden">
+      <Sidebar
+        turns={turns}
+        uploadedFileName={uploadedFile?.name ?? null}
+        open={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+        onNewChat={newChat}
+        onSelectTurn={selectTurn}
+        onClearFile={() => setUploadedFile(null)}
+        onQuickAsk={setQuestion}
+      />
 
-      <div className="space-y-8">
-        {/* Quick actions */}
-        <section>
-          <h2 className="mb-1 text-sm font-semibold text-[var(--color-ink)]">
-            Quick actions
-          </h2>
-          <p className="mb-3 text-xs text-[var(--color-ink-muted)]">
-            One click starts a common task. Anomaly checks need a file attached
-            below.
-          </p>
-          <IntentActions
-            intents={INTENTS}
-            disabled={loading}
-            onChoose={handleIntent}
-          />
-        </section>
-
-        {/* File attach + samples */}
-        <section>
-          <TelemetryAttach
-            samples={samples}
-            sampleId={sampleId}
-            uploadedFile={uploadedFile}
-            disabled={loading}
-            onSelectSample={setSampleId}
-            onUploadFile={setUploadedFile}
-          />
-        </section>
-
-        {/* Question */}
-        <section>
-          <form
-            onSubmit={handleSubmit}
-            className="rounded-2xl border border-[var(--color-line)] bg-[var(--color-panel)]/90 p-5 shadow-sm sm:p-6"
-          >
-            <label className="mb-2 block text-sm font-semibold text-[var(--color-ink)]">
-              Your question
-            </label>
-            <textarea
-              value={question}
-              onChange={(e) => setQuestion(e.target.value)}
-              disabled={loading}
-              rows={3}
-              placeholder="e.g. How many channels does the model watch?"
-              className="w-full resize-y rounded-xl border border-[var(--color-line)] bg-[var(--color-surface)] px-4 py-3 text-sm leading-relaxed outline-none focus:border-[var(--color-accent)]"
-            />
-
-            <div className="mt-5 flex flex-wrap items-center gap-3">
-              <button
-                type="submit"
-                disabled={loading}
-                className="rounded-xl bg-[var(--color-accent)] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[var(--color-accent-dark)] disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {loading ? "Working…" : "Ask assistant"}
-              </button>
-              {loading && (
-                <span className="text-xs text-[var(--color-ink-muted)]">
-                  Anomaly checks can take a minute…
-                </span>
-              )}
-            </div>
-          </form>
-        </section>
-
-        {error && (
-          <div
-            className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-[var(--color-danger)]"
-            role="alert"
-          >
-            {error}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[var(--color-surface)]">
+        {/* Thin top bar — same surface as chat (no frosted white stripe) */}
+        <header className="shrink-0 border-b border-[var(--color-line)]/60 bg-[var(--color-surface)] px-3 py-3 sm:px-6">
+          <div className="mx-auto flex max-w-3xl items-center gap-3">
+            <button
+              type="button"
+              className="rounded-lg border border-[var(--color-line)] bg-[var(--color-panel)] px-2.5 py-1.5 text-sm text-[var(--color-ink)] md:hidden"
+              aria-label="Open sidebar"
+              onClick={() => setSidebarOpen(true)}
+            >
+              ☰
+            </button>
+            <h1 className="font-[family-name:var(--font-display)] text-xl text-[var(--color-ink)] sm:text-2xl">
+              Telemanom Assistant
+            </h1>
           </div>
-        )}
+        </header>
 
-        {result && (
-          <section className="space-y-4">
-            <div className="rounded-2xl border border-[var(--color-line)] bg-[var(--color-panel)] p-5 shadow-sm sm:p-6">
-              <h2 className="mb-3 text-sm font-semibold text-[var(--color-ink)]">
-                Answer
-              </h2>
-              <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-[var(--color-ink)]">
-                {result.final_answer}
-              </p>
+        {/* Scrollable messages — only this pane scrolls */}
+        <main
+          ref={mainRef}
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-[var(--color-surface)]"
+        >
+          <div className="mx-auto max-w-3xl px-4 pb-6 pt-6 sm:px-6">
+            {!hasMessages && !loading && (
+              <div className="flex min-h-[50vh] flex-col items-center justify-center text-center">
+                <h2 className="font-[family-name:var(--font-display)] text-3xl text-[var(--color-ink)] sm:text-4xl">
+                  How can I help?
+                </h2>
+                <p className="mt-3 max-w-md text-sm text-[var(--color-ink-muted)]">
+                  Ask about the model, or attach a telemetry CSV and ask to score
+                  or compare alarms. Type{" "}
+                  <span className="font-medium text-[var(--color-ink)]">/</span>{" "}
+                  for sample questions.
+                </p>
+              </div>
+            )}
+
+            <div className="space-y-6">
+              {turns.map((turn, index) => {
+                const isLast = index === turns.length - 1;
+                const waiting = loading && isLast && !turn.result && !turn.error;
+
+                return (
+                  <div
+                    key={index}
+                    ref={(el) => {
+                      turnRefs.current[index] = el;
+                    }}
+                    className="space-y-4"
+                  >
+                    {/* User message */}
+                    <div className="flex justify-end">
+                      <div className="max-w-[85%] rounded-2xl rounded-br-md bg-[var(--color-ink)] px-4 py-3 text-[15px] leading-relaxed text-white">
+                        <p className="whitespace-pre-wrap">{turn.question}</p>
+                        {turn.fileName && (
+                          <p className="mt-2 truncate text-xs text-white/70">
+                            📎 {turn.fileName}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Assistant message */}
+                    <div className="flex justify-start">
+                      <div className="max-w-[90%] space-y-3">
+                        {waiting && (
+                          <div className="rounded-2xl rounded-bl-md border border-[var(--color-line)] bg-white px-4 py-3 text-sm text-[var(--color-ink-muted)]">
+                            Working…
+                            <span className="mt-1 block text-xs">
+                              Anomaly checks can take a minute.
+                            </span>
+                          </div>
+                        )}
+
+                        {turn.error && (
+                          <div
+                            className="rounded-2xl rounded-bl-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-[var(--color-danger)]"
+                            role="alert"
+                          >
+                            {turn.error}
+                          </div>
+                        )}
+
+                        {turn.result && (
+                          <>
+                            <div className="rounded-2xl rounded-bl-md border border-[var(--color-line)] bg-white px-4 py-3 text-[15px] leading-relaxed text-[var(--color-ink)] shadow-sm">
+                              <p className="whitespace-pre-wrap">
+                                {turn.result.final_answer}
+                              </p>
+                            </div>
+
+                            {turn.result.tool_steps.length > 0 && (
+                              <details className="rounded-xl border border-[var(--color-line)] bg-white/80 px-4 py-3">
+                                <summary className="cursor-pointer text-xs font-medium text-[var(--color-ink-muted)]">
+                                  What the system did (
+                                  {turn.result.tool_steps.length})
+                                </summary>
+                                <div className="mt-3">
+                                  <ToolSteps steps={turn.result.tool_steps} />
+                                </div>
+                              </details>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
 
-            <div className="rounded-2xl border border-[var(--color-line)] bg-[var(--color-panel)]/80 p-5 shadow-sm sm:p-6">
-              <h2 className="mb-3 text-sm font-semibold text-[var(--color-ink)]">
-                What the system did
-              </h2>
-              <ToolSteps steps={result.tool_steps} />
-            </div>
-          </section>
-        )}
+            <div ref={bottomRef} />
+          </div>
+        </main>
+
+        {/* Bottom composer — same surface as chat */}
+        <footer className="shrink-0 bg-[var(--color-surface)] px-4 pb-3 pt-0 sm:px-6 sm:pb-4">
+          <div className="mx-auto max-w-3xl">
+            <ChatComposer
+              value={question}
+              uploadedFile={uploadedFile}
+              loading={loading}
+              onChange={setQuestion}
+              onUploadFile={setUploadedFile}
+              onSubmit={sendMessage}
+            />
+            <p className="mt-2 text-center text-[11px] text-[var(--color-ink-muted)]">
+              Attach a CSV for anomaly checks · Enter to send · Shift+Enter for a
+              new line
+            </p>
+          </div>
+        </footer>
       </div>
     </div>
   );

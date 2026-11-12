@@ -18,11 +18,10 @@ esa-telemanom-agent/
     llm.py       ← provider + tool-calling loop
     agent.py     ← terminal entrypoint
   api/           ← FastAPI HTTP wrapper
-    schemas.py   ← request / response models
-    main.py      ← routes: /health, /agent/run
   frontend/      ← React + Vite + Tailwind
-    src/App.tsx  ← main UI
-    src/api.ts   ← calls FastAPI
+  samples/       ← small CSV windows for demos / tests
+  docs/          ← TOOL_CONTRACTS.md (stable tool I/O)
+  tests/         ← pytest regression (RAG + score/compare)
 ```
 
 ## Setup
@@ -126,4 +125,21 @@ Optional: `frontend/.env` with `VITE_API_BASE` if the API is not on port 8100.
 | `score_telemetry` | `model/` + `scoring/` |
 | `compare_alarms_to_labels` | alarms vs `is_anomaly_*` (+ ESAScores) |
 
+Contracts: `docs/TOOL_CONTRACTS.md` (keep stable before multi-agent work).
+
 No LangChain / LangGraph — custom tool-calling loop in `agent/llm.py`.
+
+## Tests (regression)
+
+Needs FAISS index + `model/model.h5` + `samples/demo_known_events.csv`.  
+Does **not** call the LLM.
+
+```bash
+conda activate esa-agent
+cd ~/ESA_ADB/esa-telemanom-agent
+pip install -r requirements.txt
+python -m rag.build_index   # if index missing
+pytest tests/ -q
+```
+
+Score/compare tests use a short `max_rows=500` slice so CPU runs stay reasonable.

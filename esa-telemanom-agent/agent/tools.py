@@ -2,6 +2,10 @@
 
 Each tool returns a plain string (for the LLM observation).
 TOOLS_SPEC describes the same tools in OpenAI function-calling format.
+
+Stable I/O contracts are documented in docs/TOOL_CONTRACTS.md.
+Keep those contracts stable before adding multi-agent routing.
+Failures always start with the prefix "Error:".
 """
 from __future__ import annotations
 

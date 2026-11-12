@@ -27,3 +27,6 @@ pandas
 more-itertools
 tensorflow>=2.5,<2.16
 portion  # ESAScores (ESA-ADB / TimeEval metrics)
+
+# Regression tests (tool contracts — no LLM required)
+pytest>=7.0.0
